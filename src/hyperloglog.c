@@ -582,17 +582,14 @@ int hllDenseSet(uint8_t *registers, long index, uint8_t count, uint8_t *minval, 
     HLL_DENSE_GET_REGISTER(oldcount,registers,index);
     if (count > oldcount) {
         HLL_DENSE_SET_REGISTER(registers,index,count);
-
-        (*minvalcount)++;
         if (oldcount == *minval) {
+            (*minvalcount)++;
+            printf(">>>>> {count %d}  {min val %d}  {min val count %d}  {regs %d}\n", oldcount, *minval, *minvalcount, HLL_REGISTERS);
             if (*minvalcount == HLL_REGISTERS) {
-
                 int reghisto[HLL_Q+2] = {0};
                 hllDenseRegHisto(registers, reghisto, minval, minvalcount);
-                *minvalcount = 0;
             } 
         }
-        
         return 1;
     } else {
         return 0;
@@ -664,6 +661,9 @@ int hllSparseToDense(robj *o) {
             p++;
         }
     }
+
+    int reghisto[HLL_Q+2] = {0};
+    hllDenseRegHisto(hdr->registers, reghisto, &(hdr->minval), &(hdr->minvalcount));
 
     /* If the sparse representation was valid, we expect to find idx
      * set to HLL_REGISTERS. */
