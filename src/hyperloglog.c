@@ -182,7 +182,8 @@
 struct hllhdr {
     char magic[4];      /* "HYLL" */
     uint8_t encoding;   /* HLL_DENSE or HLL_SPARSE. */
-    uint8_t notused[3]; /* Reserved for future use, must be zero. */
+    uint8_t minval;
+    uint16_t minvalcount;
     uint8_t card[8];    /* Cached cardinality, little endian. */
     uint8_t registers[]; /* Data bytes. */
 };
@@ -485,46 +486,11 @@ int hllPatLen(uint64_t hash) {
 
 /* ================== Dense representation implementation  ================== */
 
-/* Low level function to set the dense HLL register at 'index' to the
- * specified value if the current value is smaller than 'count'.
- *
- * 'registers' is expected to have room for HLL_REGISTERS plus an
- * additional byte on the right. This requirement is met by sds strings
- * automatically since they are implicitly null terminated.
- *
- * The function always succeed, however if as a result of the operation
- * the approximated cardinality changed, 1 is returned. Otherwise 0
- * is returned. */
-int hllDenseSet(uint8_t *registers, long index, uint8_t count) {
-    uint8_t oldcount;
-
-    HLL_DENSE_GET_REGISTER(oldcount,registers,index);
-    if (count > oldcount) {
-        HLL_DENSE_SET_REGISTER(registers,index,count);
-        return 1;
-    } else {
-        return 0;
-    }
-}
-
-/* "Add" the element in the dense hyperloglog data structure.
- * Actually nothing is added, but the max 0 pattern counter of the subset
- * the element belongs to is incremented if needed.
- *
- * This is just a wrapper to hllDenseSet(), performing the hashing of the
- * element in order to retrieve the index and zero-run count. */
-int hllDenseAdd(uint8_t *registers, unsigned char *ele, size_t elesize) {
-    uint64_t hash = hllHashElement(ele, elesize);
-    uint8_t count = hllPatLen(hash);
-    long index = hllRegp(hash);
-    /* Update the register if this element produced a longer run of zeroes. */
-    return hllDenseSet(registers,index,count);
-}
 
 /* Compute the register histogram in the dense representation. */
-void hllDenseRegHisto(uint8_t *registers, int* reghisto) {
+void hllDenseRegHisto(uint8_t *registers, int* reghisto, uint8_t* min, uint16_t* mincount) {
     int j;
-
+    uint8_t tmpmin = 50;
     /* Redis default is to use 16384 registers 6 bits each. The code works
      * with other values by modifying the defines, but for our target value
      * we take a faster path with unrolled loops. */
@@ -568,6 +534,23 @@ void hllDenseRegHisto(uint8_t *registers, int* reghisto) {
             reghisto[r14]++;
             reghisto[r15]++;
 
+            if (tmpmin > r0) { tmpmin = r0; }
+            if (tmpmin > r1) { tmpmin = r1; }
+            if (tmpmin > r2) { tmpmin = r2; }
+            if (tmpmin > r3) { tmpmin = r3; }
+            if (tmpmin > r4) { tmpmin = r4; }
+            if (tmpmin > r5) { tmpmin = r5; }
+            if (tmpmin > r6) { tmpmin = r6; }
+            if (tmpmin > r7) { tmpmin = r7; }
+            if (tmpmin > r8) { tmpmin = r8; }
+            if (tmpmin > r9) { tmpmin = r9; }
+            if (tmpmin > r10) { tmpmin = r10; }
+            if (tmpmin > r11) { tmpmin = r11; }
+            if (tmpmin > r12) { tmpmin = r12; }
+            if (tmpmin > r13) { tmpmin = r13; }
+            if (tmpmin > r14) { tmpmin = r14; }
+            if (tmpmin > r15) { tmpmin = r15; }
+
             r += 12;
         }
     } else {
@@ -575,10 +558,64 @@ void hllDenseRegHisto(uint8_t *registers, int* reghisto) {
             unsigned long reg;
             HLL_DENSE_GET_REGISTER(reg,registers,j);
             reghisto[reg]++;
+            if (tmpmin > reg) { tmpmin = reg; }
         }
+    }
+
+    *min = tmpmin;
+    *mincount = HLL_REGISTERS - reghisto[tmpmin];
+}
+
+/* Low level function to set the dense HLL register at 'index' to the
+ * specified value if the current value is smaller than 'count'.
+ *
+ * 'registers' is expected to have room for HLL_REGISTERS plus an
+ * additional byte on the right. This requirement is met by sds strings
+ * automatically since they are implicitly null terminated.
+ *
+ * The function always succeed, however if as a result of the operation
+ * the approximated cardinality changed, 1 is returned. Otherwise 0
+ * is returned. */
+int hllDenseSet(uint8_t *registers, long index, uint8_t count, uint8_t *minval, uint16_t *minvalcount) {
+    uint8_t oldcount;
+
+    HLL_DENSE_GET_REGISTER(oldcount,registers,index);
+    if (count > oldcount) {
+        HLL_DENSE_SET_REGISTER(registers,index,count);
+
+        (*minvalcount)++;
+        if (oldcount == *minval) {
+            if (*minvalcount == HLL_REGISTERS) {
+
+                int reghisto[HLL_Q+2] = {0};
+                hllDenseRegHisto(registers, reghisto, minval, minvalcount);
+                *minvalcount = 0;
+            } 
+        }
+        
+        return 1;
+    } else {
+        return 0;
     }
 }
 
+/* "Add" the element in the dense hyperloglog data structure.
+ * Actually nothing is added, but the max 0 pattern counter of the subset
+ * the element belongs to is incremented if needed.
+ *
+ * This is just a wrapper to hllDenseSet(), performing the hashing of the
+ * element in order to retrieve the index and zero-run count. */
+int hllDenseAdd(uint8_t *registers, unsigned char *ele, size_t elesize, uint8_t *minval, uint16_t *minvalcount) {
+    uint64_t hash = hllHashElement(ele, elesize);
+    uint8_t count = hllPatLen(hash);
+    // abort further operations if minval > count
+    if (count < *minval) {
+        return 0;
+    }
+    long index = hllRegp(hash);
+    /* Update the register if this element produced a longer run of zeroes. */
+    return hllDenseSet(registers,index,count, minval, minvalcount);
+}
 /* ================== Sparse representation implementation  ================= */
 
 /* Convert the HLL with sparse representation given as input in its dense
@@ -894,7 +931,7 @@ promote: /* Promote to dense representation. */
      * Note that this in turn means that PFADD will make sure the command
      * is propagated to slaves / AOF, so if there is a sparse -> dense
      * convertion, it will be performed in all the slaves as well. */
-    int dense_retval = hllDenseSet(hdr->registers,index,count);
+    int dense_retval = hllDenseSet(hdr->registers,index,count, &(hdr->minval), &(hdr->minvalcount));
     serverAssert(dense_retval == 1);
     return dense_retval;
 }
@@ -1025,7 +1062,7 @@ uint64_t hllCount(struct hllhdr *hdr, int *invalid) {
 
     /* Compute register histogram */
     if (hdr->encoding == HLL_DENSE) {
-        hllDenseRegHisto(hdr->registers,reghisto);
+        hllDenseRegHisto(hdr->registers,reghisto, &(hdr->minval), &(hdr->minvalcount));
     } else if (hdr->encoding == HLL_SPARSE) {
         hllSparseRegHisto(hdr->registers,
                          sdslen((sds)hdr)-HLL_HDR_SIZE,invalid,reghisto);
@@ -1053,7 +1090,7 @@ uint64_t hllCount(struct hllhdr *hdr, int *invalid) {
 int hllAdd(robj *o, unsigned char *ele, size_t elesize) {
     struct hllhdr *hdr = o->ptr;
     switch(hdr->encoding) {
-    case HLL_DENSE: return hllDenseAdd(hdr->registers,ele,elesize);
+    case HLL_DENSE: return hllDenseAdd(hdr->registers,ele,elesize, &(hdr->minval), &(hdr->minvalcount));
     case HLL_SPARSE: return hllSparseAdd(o,ele,elesize);
     default: return -1; /* Invalid representation. */
     }
@@ -1366,7 +1403,7 @@ void pfmergeCommand(client *c) {
         if (max[j] == 0) continue;
         hdr = o->ptr;
         switch(hdr->encoding) {
-        case HLL_DENSE: hllDenseSet(hdr->registers,j,max[j]); break;
+        case HLL_DENSE: hllDenseSet(hdr->registers,j,max[j], &(hdr->minval), &(hdr->minvalcount)); break;
         case HLL_SPARSE: hllSparseSet(o,j,max[j]); break;
         }
     }
@@ -1440,7 +1477,7 @@ void pfselftestCommand(client *c) {
     uint64_t ele;
     for (j = 1; j <= 10000000; j++) {
         ele = j ^ seed;
-        hllDenseAdd(hdr->registers,(unsigned char*)&ele,sizeof(ele));
+        hllDenseAdd(hdr->registers,(unsigned char*)&ele,sizeof(ele),&(hdr->minval), &(hdr->minvalcount));
         hllAdd(o,(unsigned char*)&ele,sizeof(ele));
 
         /* Make sure that for small cardinalities we use sparse
