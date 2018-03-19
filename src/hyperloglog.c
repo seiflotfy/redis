@@ -445,11 +445,19 @@ uint64_t MurmurHash64A (const void * key, int len, unsigned int seed) {
     return h;
 }
 
+uint64_t hllHashElement(unsigned char *ele, size_t elesize) {
+    return MurmurHash64A(ele,elesize,0xadc83b19ULL);
+}
+
+long hllRegp(uint64_t hash) {
+    return hash & HLL_P_MASK; /* Register index. */
+}
+
 /* Given a string element to add to the HyperLogLog, returns the length
  * of the pattern 000..1 of the element hash. As a side effect 'regp' is
  * set to the register index this element hashes to. */
-int hllPatLen(unsigned char *ele, size_t elesize, long *regp) {
-    uint64_t hash, bit, index;
+int hllPatLen(uint64_t hash) {
+    uint64_t bit;
     int count;
 
     /* Count the number of zeroes starting from bit HLL_REGISTERS
@@ -463,8 +471,6 @@ int hllPatLen(unsigned char *ele, size_t elesize, long *regp) {
      *
      * This may sound like inefficient, but actually in the average case
      * there are high probabilities to find a 1 after a few iterations. */
-    hash = MurmurHash64A(ele,elesize,0xadc83b19ULL);
-    index = hash & HLL_P_MASK; /* Register index. */
     hash >>= HLL_P; /* Remove bits used to address the register. */
     hash |= ((uint64_t)1<<HLL_Q); /* Make sure the loop terminates
                                      and count will be <= Q+1. */
@@ -474,7 +480,6 @@ int hllPatLen(unsigned char *ele, size_t elesize, long *regp) {
         count++;
         bit <<= 1;
     }
-    *regp = (int) index;
     return count;
 }
 
@@ -509,8 +514,9 @@ int hllDenseSet(uint8_t *registers, long index, uint8_t count) {
  * This is just a wrapper to hllDenseSet(), performing the hashing of the
  * element in order to retrieve the index and zero-run count. */
 int hllDenseAdd(uint8_t *registers, unsigned char *ele, size_t elesize) {
-    long index;
-    uint8_t count = hllPatLen(ele,elesize,&index);
+    uint64_t hash = hllHashElement(ele, elesize);
+    uint8_t count = hllPatLen(hash);
+    long index = hllRegp(hash);
     /* Update the register if this element produced a longer run of zeroes. */
     return hllDenseSet(registers,index,count);
 }
@@ -900,8 +906,10 @@ promote: /* Promote to dense representation. */
  * This function is actually a wrapper for hllSparseSet(), it only performs
  * the hashshing of the elmenet to obtain the index and zeros run length. */
 int hllSparseAdd(robj *o, unsigned char *ele, size_t elesize) {
-    long index;
-    uint8_t count = hllPatLen(ele,elesize,&index);
+    uint64_t hash = hllHashElement(ele, elesize);
+    uint8_t count = hllPatLen(hash);
+    long index = hllRegp(hash);
+
     /* Update the register if this element produced a longer run of zeroes. */
     return hllSparseSet(o,index,count);
 }
