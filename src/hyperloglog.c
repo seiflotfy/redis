@@ -604,7 +604,7 @@ int hllDenseSet(uint8_t *registers, long index, uint8_t count, uint8_t *minval, 
 int hllDenseAdd(uint8_t *registers, unsigned char *ele, size_t elesize, uint8_t *minval, uint16_t *minvalcount) {
     uint64_t hash = hllHashElement(ele, elesize);
     uint8_t count = hllPatLen(hash);
-    // abort further operations if minval > count
+    // abort further operations if count < minval
     if (count < *minval) {
         return 0;
     }
@@ -654,15 +654,16 @@ int hllSparseToDense(robj *o) {
             runlen = HLL_SPARSE_VAL_LEN(p);
             regval = HLL_SPARSE_VAL_VALUE(p);
             while(runlen--) {
-                HLL_DENSE_SET_REGISTER(hdr->registers,idx,regval);
+                 if (regval < hdr->minval) {
+                    continue;
+                }
+                /* Update the register if this element produced a longer run of zeroes. */
+                hllDenseSet(hdr->registers,idx,regval, &(hdr->minval), &(hdr->minvalcount));
                 idx++;
             }
             p++;
         }
     }
-
-    int reghisto[HLL_Q+2] = {0};
-    hllDenseRegHisto(hdr->registers, reghisto, &(hdr->minval), &(hdr->minvalcount));
 
     /* If the sparse representation was valid, we expect to find idx
      * set to HLL_REGISTERS. */
