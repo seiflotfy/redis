@@ -584,7 +584,6 @@ int hllDenseSet(uint8_t *registers, long index, uint8_t count, uint8_t *minval, 
         HLL_DENSE_SET_REGISTER(registers,index,count);
         if (oldcount == *minval) {
             (*minvalcount)++;
-            printf(">>>>> {count %d}  {min val %d}  {min val count %d}  {regs %d}\n", oldcount, *minval, *minvalcount, HLL_REGISTERS);
             if (*minvalcount == HLL_REGISTERS) {
                 int reghisto[HLL_Q+2] = {0};
                 hllDenseRegHisto(registers, reghisto, minval, minvalcount);
